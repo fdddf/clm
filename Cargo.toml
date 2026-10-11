@@ -1,0 +1,33 @@
+[package]
+name = "clm"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Switch between multiple Claude Code and OpenAI Codex CLI accounts on one machine, sharing one setup"
+license = "MIT"
+repository = "https://github.com/fdddf/clm"
+readme = "README.md"
+keywords = ["claude-code", "codex", "cli", "profiles", "accounts"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+hex = "0.4.3"
+indexmap = { version = "2.14.2", features = ["serde"] }
+libc = "0.2.190"
+regex = "1.13.1"
+rpassword = "7.5.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+sha2 = "0.11.0"
+unicode-normalization = "0.1.25"
+ureq = { version = "2", features = ["json"] }
+url = "2.5.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
