@@ -33,17 +33,28 @@ With personal, work or per-organization Claude Code and Codex accounts on one ma
 
 ## Install
 
-Requires Rust 1.88+ and at least one of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or the [Codex CLI](https://github.com/openai/codex). Runs on macOS and Linux (zsh or bash).
+macOS and Linux (x86_64 and arm64), zsh or bash. You need at least one of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or the [Codex CLI](https://github.com/openai/codex).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fdddf/clm/main/install.sh | sh
+```
+
+The installer downloads the prebuilt binary for your platform from the [latest release](https://github.com/fdddf/clm/releases/latest), checks it against the published SHA-256, puts it in `~/.local/bin`, and adds `eval "$(clm shell-init)"` to your `~/.zshrc` (or bash rc file). Open a new terminal afterwards. Running it again updates clm.
+
+| Variable | Effect |
+| --- | --- |
+| `CLM_VERSION=v0.1.0` | Install that release instead of the latest |
+| `CLM_INSTALL_DIR=/usr/local/bin` | Install somewhere else |
+| `CLM_NO_HOOK=1` | Leave your rc file alone |
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fdddf/clm/main/install.sh | CLM_NO_HOOK=1 sh
+```
+
+From source instead (Rust 1.88+):
 
 ```bash
 cargo install --git https://github.com/fdddf/clm
-# or from a checkout:
-git clone https://github.com/fdddf/clm && cd clm && cargo install --path .
-```
-
-Then add the shell hook and open a new terminal:
-
-```bash
 echo 'eval "$(clm shell-init)"' >> ~/.zshrc    # ~/.bashrc for bash
 ```
 
@@ -181,7 +192,7 @@ The format is clausona's `~/.clausona/`:
 - No TUI dashboard: bare `clm` prints help, and `init` and `use` without a profile ask in the terminal.
 - No launch cache: `_launch` takes about 8 ms, so the hook calls it every time.
 - No Windows / PowerShell support.
-- No `update` command; update with `cargo install`.
+- No `update` command; run the install script again to update.
 - Running `init` again keeps usage history.
 - Plugin sync reads the primary's `known_marketplaces.json` first, so a marketplace's `source` is not lost.
 - The fleet plugins (Superset, herdr, Orca) are not ported.
@@ -193,6 +204,8 @@ cargo build
 cargo test
 cargo clippy --all-targets
 ```
+
+Pushing a `v*` tag builds static binaries for macOS and Linux (x86_64 and arm64) and publishes them, with their checksums and `install.sh`, as a GitHub release.
 
 ## License
 

@@ -1711,9 +1711,13 @@ pub fn uninstall() -> Vec<String> {
             }
         }
     }
-    for rc in [h.join(".zshrc"), h.join(".bashrc")] {
+    for rc in [h.join(".zshrc"), h.join(".bashrc"), h.join(".bash_profile")] {
         if let Some(content) = util::read_text(&rc) {
-            let filtered: Vec<&str> = content.split('\n').filter(|l| !l.contains("clm shell-init")).collect();
+            // The hook line, and the comment install.sh writes above it.
+            let filtered: Vec<&str> = content
+                .split('\n')
+                .filter(|l| !l.contains("clm shell-init") && !l.starts_with("# clm: switch Claude Code"))
+                .collect();
             let filtered = filtered.join("\n");
             if filtered != content && fs::write(&rc, filtered).is_ok() {
                 removed.push(format!("shell-init: {}", rc.display()));
