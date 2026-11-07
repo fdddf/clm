@@ -25,6 +25,7 @@ With personal, work or per-organization Claude Code and Codex accounts on one ma
 - **Shared environment**: for Claude Code, plugins (and the MCP servers they bring), `settings.json` with its hooks and permissions, skills, commands and agents; for Codex, `config.toml`, skills, plugins and hooks. Shared across the accounts of each tool.
 - **Shared history, if you want it**: after `clm config <profile> --merge-sessions`, `claude --resume` / `--continue` (and `codex resume` on macOS and Linux) find conversations from every account that shares history.
 - **Plan quota at a glance**: 5-hour and weekly usage for every account, read from each tool's own usage endpoint. Lapsed tokens are renewed on demand.
+- **Desktop sessions in the terminal**: `clm sessions` lists the Claude desktop app's Code-tab sessions by title and folder, and `clm sessions resume <id>` continues one with `claude --resume` in the session's folder.
 - **Two accounts at once**: `clm run claude:personal` starts one session under another account without switching.
 - **API profiles**: a profile can point at the Anthropic API, a gateway such as OpenRouter, or a model you serve yourself, instead of a subscription login (Claude Code only).
 - **Pure passthrough**: the shell hook sets the profile's environment for one run and executes the real `claude` / `codex`. No daemon, no proxy, no server.
@@ -115,6 +116,33 @@ clm config claude:gw --key-from env:OTHER_KEY
 clm config claude:gw --show [--json]                       # never prints the key
 ```
 
+## Desktop sessions
+
+The Code tab of the Claude desktop app runs Claude Code itself and saves each conversation where the CLI saves its own: `~/.claude/projects/<folder>/<session-id>.jsonl`. So the CLI can already resume them. The only extra step is finding the id, which the app keeps in its own index. `clm sessions` reads that index and never writes to it:
+
+```
+$ clm sessions --here
+    ID        ACTIVE      FOLDER                         TITLE
+    ────────────────────────────────────────────────────────────────────
+  ● d2921d90  open        ~/DevResearch/clm              Import desktop sessions into the CLI
+    75185bde  2h          ~/DevResearch/clm              Fix discover prompt
+```
+
+```bash
+clm sessions                       # 20 most recent, every folder
+clm sessions clm --limit 0         # every session whose title, folder or id contains "clm"
+clm sessions resume 75185bde       # cd to its folder and run claude --resume <id>
+clm sessions resume d292 --fork    # open in the app (●): continue in a copy instead
+clm sessions resume 7518 -- --model sonnet   # anything after -- goes to claude
+```
+
+- **Open sessions**: ● marks a session the app has open right now. `resume` refuses one unless you pass `--fork`, because two processes writing the same transcript corrupt it.
+- **Which profile**: `resume` runs under the active profile when it can see the session's history (merged sessions, or the profile the app writes to). Otherwise it uses the account the app ran the session under, and failing that any profile that can see it. `--profile` picks one yourself.
+- **Gone transcripts**: Claude Code deletes transcripts after `cleanupPeriodDays` (30 days by default), and the app's index keeps the title. `--all` lists those as `[gone]`, along with archived sessions.
+- **Where the app keeps its data**: `~/Library/Application Support/Claude` on macOS, `$XDG_CONFIG_HOME/Claude` elsewhere. Set `CLM_CLAUDE_DESKTOP_DIR` to point somewhere else.
+
+Going the other way, the desktop app has **Import Claude Code CLI Sessions…**, which adds sessions started in the terminal to its list.
+
 ## Commands
 
 `<profile>` is a bare name (`work`) when it is unique, or `tool:name` (`claude:work`, `codex:work`).
@@ -134,6 +162,8 @@ clm config claude:gw --show [--json]                       # never prints the ke
 | `clm config <profile> --model <id> \| --set K=V \| --unset K \| --edit` | Per-profile environment settings |
 | `clm config <profile> --base-url \| --auth \| --label \| --key \| --key-from` | Change an API profile |
 | `clm config <profile> --show [--json]` | Show settings (`--json` adds the settings catalog) |
+| `clm sessions [<search>] [--here] [--all] [--limit <n>] [--json]` | List the Claude desktop app's Code-tab sessions |
+| `clm sessions resume <id> [--fork] [--profile <p>] [-- args...]` | Continue a desktop session with `claude --resume` in its folder |
 | `clm doctor [--json]` | Check every profile |
 | `clm repair <profile> [--force]` | Fix shared links |
 | `clm login <profile>` | Sign in again |

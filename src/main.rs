@@ -15,6 +15,7 @@ mod quota;
 mod registry;
 mod secrets;
 mod service;
+mod sessions;
 mod shell;
 mod style;
 mod tools;
@@ -30,6 +31,16 @@ fn main() {
         None => {
             println!("{}", commands::run_command("help", &[]).unwrap_or_default());
             0
+        }
+        // Runs claude, so it returns claude's exit code rather than text to print.
+        Some((command, rest)) if command == "sessions" && rest.first().is_some_and(|a| a == "resume") => {
+            match commands::resume_session(&rest[1..]) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("  {} {e}", fail_icon());
+                    1
+                }
+            }
         }
         Some((command, rest)) if command == "run" && rest.first().is_some_and(|p| !p.starts_with('-')) => {
             let profile = &rest[0];

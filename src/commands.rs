@@ -42,10 +42,12 @@ fn known_flags(command: &str) -> Option<(Vec<&'static str>, Vec<&'static str>)> 
         "current" | "doctor" | "_launch" | "_shell-env" => vec!["--json"],
         "config" => [&["--merge-sessions", "--separate-sessions", "--force", "--key", "--edit", "--show", "--json"][..], CONFIG_VALUE_FLAGS].concat(),
         "repair" => vec!["--force"],
+        "sessions" => vec!["--here", "--all", "--json", "--limit"],
         _ => return None,
     };
     let prefixes: Vec<&'static str> = match command {
         "add" => ADD_VALUE_FLAGS.to_vec(),
+        "sessions" => vec!["--limit"],
         "config" => CONFIG_VALUE_FLAGS.to_vec(),
         "usage" => vec!["--period"],
         _ => vec![],
@@ -361,6 +363,7 @@ fn usage_text() -> String {
                 ("list", "Show profiles with quota and usage"),
                 ("usage [profile]", "Show usage summary"),
                 ("current", "Show active profile details"),
+                ("sessions", "List Claude desktop sessions; `sessions resume <id>` continues one here"),
                 ("config <profile>", "Configure profile settings"),
                 ("doctor", "Check profile health"),
                 ("repair <profile>", "Repair shared links"),
@@ -527,6 +530,32 @@ fn subcommand_help(command: &str) -> Option<String> {
             &[("--force", "Repair a Codex profile while Codex runs in it")],
             &[],
         ),
+        "sessions" => sub_help(
+            "clm sessions",
+            "List the Claude desktop app's Code-tab sessions and continue them in the CLI",
+            &[
+                "clm sessions [<search>] [--here] [--all] [--limit <n>] [--json]",
+                "clm sessions resume <id> [--fork] [--profile <profile>] [-- claude-args...]",
+            ],
+            &[
+                ("<search>", "Only sessions whose title, folder or id contains this"),
+                ("--here", "Only sessions in this folder or below it"),
+                ("--all", "Include archived sessions and ones whose transcript is gone"),
+                ("--limit <n>", "Show at most n (default 20; 0 for all)"),
+                ("--json", "Output as JSON (every match unless --limit is given)"),
+                ("--fork", "resume: continue in a new copy, leaving the original as it was"),
+                ("--profile", "resume: run as this profile instead of the one picked for you"),
+            ],
+            &[
+                "The app runs Claude Code and saves each session where the CLI saves its own,",
+                "so `resume` runs `claude --resume <id>` in the session's folder. <id> is the",
+                "ID column, or any 4+ characters it starts with. ● marks a session open in the",
+                "app right now; resume refuses those unless --fork, since two writers corrupt",
+                "a transcript. Profile: the active one if it sees the session's history, else",
+                "the account the app ran it as, else any that sees it. Claude Code deletes",
+                "transcripts after cleanupPeriodDays (30 by default); --all lists those as gone.",
+            ],
+        ),
         "login" => sub_help("clm login", "Re-authenticate a profile", &["clm login <profile>"], &[], &[]),
         "remove" => sub_help(
             "clm remove",
@@ -624,6 +653,7 @@ pub fn run_command(command: &str, args: &[String]) -> Result<String> {
         "add" => cmd_add(args),
         "init" => cmd_init(args),
         "discover" => cmd_discover(args),
+        "sessions" => cmd_sessions(args, json_out),
         "uninstall" => cmd_uninstall(),
         "run" => bail!("Usage: clm run <profile> [claude-args...]"),
         "_launch" | "_shell-env" => Ok(cmd_launch(args, command == "_launch")),
@@ -643,6 +673,56 @@ pub fn run_command(command: &str, args: &[String]) -> Result<String> {
         other if other.starts_with('_') => bail!("Unknown command: {other}\n{}", usage_text()),
         _ => Ok(usage_text()),
     }
+}
+
+fn parse_limit(args: &[String]) -> Result<Option<usize>> {
+    option_value(args, "--limit")?
+        .map(|v| v.parse::<usize>().map_err(|_| anyhow!("--limit takes a whole number, such as --limit 50 (0 for all).")))
+        .transpose()
+}
+
+fn cmd_sessions(args: &[String], json_out: bool) -> Result<String> {
+    let rest = positional(args, &["--limit"]);
+    if rest.len() > 1 {
+        bail!("Give one search term; quote it if it has spaces.\nUsage: clm sessions [<search>] [--here] [--all] [--limit <n>] [--json]");
+    }
+    let opts = crate::sessions::ListOptions {
+        query: rest.into_iter().next(),
+        here: has(args, "--here"),
+        all: has(args, "--all"),
+        limit: parse_limit(args)?,
+    };
+    crate::sessions::cmd_list(&opts, json_out)
+}
+
+/// `clm sessions resume <id> [--fork] [--profile <p>] [-- claude-args...]`. Everything after
+/// the first `--` goes to claude untouched.
+pub fn resume_session(args: &[String]) -> Result<i32> {
+    let (own, claude_args) = match args.iter().position(|a| a == "--") {
+        Some(i) => (&args[..i], args[i + 1..].to_vec()),
+        None => (args, Vec::new()),
+    };
+    if has(own, "--help") || has(own, "-h") {
+        println!("{}", subcommand_help("sessions").unwrap_or_default());
+        return Ok(0);
+    }
+    for arg in own {
+        if arg.starts_with('-') && arg != "--fork" && arg != "--profile" && !arg.starts_with("--profile=") {
+            bail!("Unknown option: {}\nPass options meant for claude after `--`: clm sessions resume <id> -- --model sonnet", arg.split('=').next().unwrap_or(arg));
+        }
+    }
+    let ids = positional(own, &["--profile"]);
+    let session = match ids.as_slice() {
+        [one] => one.clone(),
+        [] => bail!("Usage: clm sessions resume <id> [--fork] [--profile <profile>] [-- claude-args...]\nRun `clm sessions` for the ids."),
+        _ => bail!("Give one session id."),
+    };
+    crate::sessions::resume(&crate::sessions::ResumeOptions {
+        session,
+        profile: option_value(own, "--profile")?,
+        fork: has(own, "--fork"),
+        claude_args,
+    })
 }
 
 fn cmd_list(args: &[String], json_out: bool) -> Result<String> {

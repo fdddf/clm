@@ -168,7 +168,7 @@ fn candidate_layouts(show_quota: bool, show_model: bool) -> Vec<Layout> {
     out
 }
 
-fn terminal_width() -> usize {
+pub fn terminal_width() -> usize {
     if let Some(c) = std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()) {
         return c;
     }
