@@ -64,6 +64,7 @@ echo 'eval "$(clm shell-init)"' >> ~/.zshrc    # ~/.bashrc for bash
 
 ```bash
 clm init                 # discover signed-in accounts and register them (--auto: no questions)
+clm discover             # later: register accounts signed in since, leaving the rest as they are
 clm add claude:work      # create ~/.claude-work and run Claude Code's own sign-in
 clm add codex:work       # create ~/.codex-work and run codex login
 clm use work             # a bare name works when it is unique across tools
@@ -121,6 +122,7 @@ clm config claude:gw --show [--json]                       # never prints the ke
 | Command | Description |
 | --- | --- |
 | `clm init [--auto] [--merge-sessions]` | Discover and register signed-in accounts; the first run imports `~/.clausona` |
+| `clm discover [--auto] [--merge-sessions \| --separate-sessions]` | Register only accounts clm does not know yet; existing profiles keep their names and settings |
 | `clm add <profile> [--from <path>] [--merge-sessions]` | Add and sign in a profile, or import an existing directory |
 | `clm add <profile> --api --base-url <url> [...]` | Add an API profile |
 | `clm use [profile]` | Switch the active profile (asks when none is given) |
@@ -194,6 +196,7 @@ The format is clausona's `~/.clausona/`:
 - No Windows / PowerShell support.
 - No `update` command; run the install script again to update.
 - Running `init` again keeps usage history.
+- Proposed profile names come from the account's email (`wyl@mzjpg.com` → `wyl`). A profile keeps its registered name while its directory holds the same account; one signed in to another account since is offered a new name, and renaming it carries its backup, usage history and active selection along.
 - Plugin sync reads the primary's `known_marketplaces.json` first, so a marketplace's `source` is not lost.
 - The fleet plugins (Superset, herdr, Orca) are not ported.
 

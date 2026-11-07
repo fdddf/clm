@@ -34,6 +34,7 @@ const API_ONLY_FLAGS: &[&str] = &["--base-url", "--model", "--auth", "--key-from
 fn known_flags(command: &str) -> Option<(Vec<&'static str>, Vec<&'static str>)> {
     let flags: Vec<&'static str> = match command {
         "init" => vec!["--auto", "--merge-sessions", "--force"],
+        "discover" => vec!["--auto", "--merge-sessions", "--separate-sessions"],
         "add" => [&["--merge-sessions", "--api"][..], ADD_VALUE_FLAGS].concat(),
         "use" | "login" | "remove" | "shell-init" | "uninstall" | "version" => vec![],
         "list" => vec!["--json", "--no-quota", "--no-renew", "--refresh"],
@@ -353,7 +354,8 @@ fn usage_text() -> String {
             "COMMANDS",
             &[
                 ("run <profile>", "Run the CLI with a specific profile"),
-                ("init", "Discover accounts and register them"),
+                ("init", "Set up clm: register every signed-in account"),
+                ("discover", "Register accounts signed in since, leaving the rest as they are"),
                 ("add <profile>", "Add a new profile (--api for an endpoint instead of a login)"),
                 ("use [profile]", "Switch active profile"),
                 ("list", "Show profiles with quota and usage"),
@@ -412,6 +414,23 @@ fn subcommand_help(command: &str) -> Option<String> {
                 "Registers the Claude Code and Codex accounts already signed in; with none,",
                 "sign in with `claude login` or `codex login` first. API profiles already",
                 "registered are kept. A profiles.json that cannot be read is refused, not replaced.",
+            ],
+        ),
+        "discover" => sub_help(
+            "clm discover",
+            "Register accounts signed in since the last init",
+            &["clm discover [--auto] [--merge-sessions | --separate-sessions]"],
+            &[
+                ("--auto", "Run non-interactively (accept every proposed name)"),
+                ("--merge-sessions", "Share session history with the new profiles"),
+                ("--separate-sessions", "Keep the new profiles' session history apart"),
+            ],
+            &[
+                "Looks through ~/.claude* and ~/.codex* for signed-in accounts clm does not",
+                "know yet and adds each one as `clm add <name> --from <dir>` would. Profiles",
+                "already registered keep their names and settings; one whose dir is now signed",
+                "in to another account gets that account's email recorded. Sessions are shared",
+                "by default when every registered profile already shares them.",
             ],
         ),
         "add" => sub_help(
@@ -604,6 +623,7 @@ pub fn run_command(command: &str, args: &[String]) -> Result<String> {
         }
         "add" => cmd_add(args),
         "init" => cmd_init(args),
+        "discover" => cmd_discover(args),
         "uninstall" => cmd_uninstall(),
         "run" => bail!("Usage: clm run <profile> [claude-args...]"),
         "_launch" | "_shell-env" => Ok(cmd_launch(args, command == "_launch")),
@@ -1157,6 +1177,108 @@ fn cmd_init(args: &[String]) -> Result<String> {
         ));
     }
     Ok(out)
+}
+
+fn cmd_discover(args: &[String]) -> Result<String> {
+    let registry = require_registry()?;
+    let found = service::discover(&registry);
+    let mut out: Vec<String> = Vec::new();
+    for (id, old_email, a) in &found.changed {
+        service::record_account_change(id, a)?;
+        out.push(format!(
+            "  {} {} is now signed in as {} {}",
+            warn_icon(),
+            bold(id),
+            bold(&a.email),
+            dim(&format!("(was {})", if old_email.is_empty() { "unknown" } else { old_email }))
+        ));
+    }
+    for a in &found.unregistered_primary {
+        out.push(format!(
+            "  {} {} {} is {}'s primary and is not registered: run {} to set it up",
+            warn_icon(),
+            a.email,
+            dim(&shown_config_path(&a.config_dir.to_string_lossy())),
+            a.tool,
+            accent("clm init")
+        ));
+    }
+    if found.new.is_empty() {
+        out.push(dim("  No new accounts found. Sign in to another account with `clm add <name>`, or with").to_string());
+        out.push(dim("  `CLAUDE_CONFIG_DIR=~/.claude-<name> claude` and run `clm discover` again.").to_string());
+        return Ok(out.join("\n"));
+    }
+    let interactive = !has(args, "--auto") && util::isatty(0) && util::isatty(1);
+    let mut chosen = std::collections::HashMap::new();
+    if interactive {
+        for line in out.drain(..) {
+            println!("{line}");
+        }
+        let proposed = service::propose_init_names(&found.new, Some(&registry), &chosen);
+        println!("\n  {}\n", bold("New accounts found"));
+        for a in &found.new {
+            println!(
+                "    {} {}  {}",
+                accent(&pad_plain(a.tool.name(), 7)),
+                pad_plain(&a.email, 32),
+                dim(&shown_config_path(&a.config_dir.to_string_lossy()))
+            );
+        }
+        println!("\n  {}", dim("Name each profile (Enter keeps the proposed name, - skips the account)."));
+        for a in &found.new {
+            let proposal = &proposed[&a.config_dir];
+            let answer = ask(&format!("    {} {} [{}]: ", a.tool, a.email, accent(proposal))).unwrap_or_default();
+            if answer == "-" {
+                chosen.insert(a.config_dir.clone(), String::new());
+            } else if !answer.is_empty() {
+                registry::validate_profile_name(&answer)?;
+                chosen.insert(a.config_dir.clone(), answer);
+            }
+        }
+    }
+    let skipped: Vec<PathBuf> = chosen.iter().filter(|(_, n)| n.is_empty()).map(|(d, _)| d.clone()).collect();
+    chosen.retain(|_, n| !n.is_empty());
+    let accounts: Vec<_> = found.new.iter().filter(|a| !skipped.contains(&a.config_dir)).cloned().collect();
+    let names = service::propose_init_names(&accounts, Some(&registry), &chosen);
+    let merge = if has(args, "--merge-sessions") {
+        true
+    } else if has(args, "--separate-sessions") {
+        false
+    } else {
+        let inherited = service::registry_merges_sessions(&registry);
+        if interactive && !accounts.is_empty() {
+            let hint = if inherited { "(Y/n)" } else { "(y/N)" };
+            let answer = ask(&format!("\n  Share session history with the other profiles? {} ", accent(hint))).unwrap_or_default();
+            match answer.to_lowercase().as_str() {
+                "y" | "yes" => true,
+                "n" | "no" => false,
+                _ => inherited,
+            }
+        } else {
+            inherited
+        }
+    };
+    let mut failed = false;
+    for a in &accounts {
+        let name = &names[&a.config_dir];
+        let id = profile_id(a.tool, name);
+        match service::add_profile(a.tool, name, Some(&a.config_dir.to_string_lossy()), merge) {
+            Ok(added) => {
+                out.push(success(&format!("Added {} {}", bold(&id), dim(&format!("({})", added.email)))));
+                for w in &added.warnings {
+                    out.push(format!("  {} {w}", warn_icon()));
+                }
+            }
+            Err(e) => {
+                failed = true;
+                out.push(format!("  {} {} {e}", fail_icon(), bold(&id)));
+            }
+        }
+    }
+    if failed {
+        bail!("{}\nSome accounts were not added.", out.join("\n"));
+    }
+    Ok(out.join("\n"))
 }
 
 fn cmd_uninstall() -> Result<String> {

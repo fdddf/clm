@@ -99,16 +99,15 @@ fn directory_name(dir: &Path) -> String {
     base
 }
 
-/// The name offered for an account found at `dir`: the directory's name without its prefix,
-/// made to fit the name rule.
-fn default_profile_name(dir: &Path) -> String {
-    let name = directory_name(dir);
-    if validate_profile_name(&name).is_ok() {
-        return name;
+/// `raw` made to fit the name rule: runs of other characters become one `-`, and it must start
+/// with a letter or digit. None when nothing usable is left.
+fn fit_profile_name(raw: &str) -> Option<String> {
+    if validate_profile_name(raw).is_ok() {
+        return Some(raw.to_string());
     }
     let mut fitted = String::new();
     let mut in_bad = false;
-    for c in name.chars() {
+    for c in raw.chars() {
         if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
             fitted.push(c);
             in_bad = false;
@@ -118,36 +117,65 @@ fn default_profile_name(dir: &Path) -> String {
         }
     }
     let fitted = fitted.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).trim_end_matches('-').to_string();
-    if validate_profile_name(&fitted).is_ok() { fitted } else { "profile".into() }
+    validate_profile_name(&fitted).is_ok().then_some(fitted)
+}
+
+/// The part of an email before the `@`, lowercased.
+fn email_local_part(email: &str) -> String {
+    email.split('@').next().unwrap_or("").trim().to_lowercase()
+}
+
+/// The name offered for an account found signed in: the account's email before the `@`, so the
+/// name says whose account it is; failing that, the directory's name without its prefix, then
+/// "default" for the primary.
+fn default_profile_name(a: &DiscoveredAccount) -> String {
+    fit_profile_name(&email_local_part(&a.email))
+        .or_else(|| fit_profile_name(&directory_name(&a.config_dir)))
+        .unwrap_or_else(|| if a.is_primary { "default".into() } else { "profile".into() })
+}
+
+/// Whether a registered profile still holds the account it was registered with. A config dir
+/// signed in to another account since is named afresh rather than keeping a name that says
+/// someone else.
+fn same_account(registered: &Profile, account: &DiscoveredAccount) -> bool {
+    registered.email.is_empty() || registered.email.eq_ignore_ascii_case(&account.email)
+}
+
+/// The registered profile on `account`'s config dir, if any: its id and profile.
+fn registered_on<'a>(registry: &'a Registry, account: &DiscoveredAccount) -> Option<(&'a String, &'a Profile)> {
+    registry
+        .profiles
+        .iter()
+        .find(|(_, p)| !p.is_api() && p.tool() == account.tool && util::resolve(&p.dir()) == util::resolve(&account.config_dir))
 }
 
 /// The names init gives the accounts it found, keyed by config dir: a chosen name, the name an
-/// account is already registered under, "default" for the primary, or the directory's name,
-/// with `-2`, `-3`, ... where a derived name is taken.
+/// account is already registered under (while the dir still holds that account), or one made
+/// from the account's email, with `-2`, `-3`, ... where a derived name is taken.
 pub fn propose_init_names(accounts: &[DiscoveredAccount], registry: Option<&Registry>, chosen: &HashMap<PathBuf, String>) -> HashMap<PathBuf, String> {
-    let mut occupied: HashSet<String> = HashSet::new();
+    let empty = Registry::empty();
+    let reg = registry.unwrap_or(&empty);
+    // Folded profile id -> the config dir that holds the name, through the registry or a
+    // backup directory left under it.
+    let mut held: HashMap<String, Option<PathBuf>> = HashMap::new();
     for tool in ALL_TOOLS {
         let base = data_dir().join("backups").join(tool.name());
         for name in util::read_dir_names(&base) {
             if util::dir_occupied(&base.join(&name)) {
-                occupied.insert(fold_profile_name(&profile_id(tool, &name)));
+                held.insert(fold_profile_name(&profile_id(tool, &name)), None);
             }
         }
     }
-    let empty = Registry::empty();
-    let reg = registry.unwrap_or(&empty);
-    let registered_name = |a: &DiscoveredAccount| {
-        reg.profiles
-            .iter()
-            .find(|(_, p)| p.tool() == a.tool && util::resolve(&p.dir()) == util::resolve(&a.config_dir))
-            .map(|(id, _)| name_of(id).to_string())
-    };
+    for (id, p) in &reg.profiles {
+        held.insert(fold_profile_name(id), (!p.is_api()).then(|| util::resolve(&p.dir())));
+    }
     let mut names: HashMap<PathBuf, String> = HashMap::new();
     let mut assigned: HashSet<String> =
         reg.profiles.iter().filter(|(_, p)| p.is_api()).map(|(id, _)| fold_profile_name(id)).collect();
     let mut to_derive = Vec::new();
     for a in accounts {
-        match chosen.get(&a.config_dir).cloned().or_else(|| registered_name(a)) {
+        let registered = registered_on(reg, a).filter(|(_, p)| same_account(p, a)).map(|(id, _)| name_of(id).to_string());
+        match chosen.get(&a.config_dir).cloned().or(registered) {
             Some(name) => {
                 assigned.insert(fold_profile_name(&profile_id(a.tool, &name)));
                 names.insert(a.config_dir.clone(), name);
@@ -155,14 +183,24 @@ pub fn propose_init_names(accounts: &[DiscoveredAccount], registry: Option<&Regi
             None => to_derive.push(a),
         }
     }
-    let registered: HashSet<String> = reg.profiles.keys().map(|k| fold_profile_name(k)).collect();
-    let fitted = |a: &DiscoveredAccount| !a.is_primary && default_profile_name(&a.config_dir) != directory_name(&a.config_dir);
+    // Accounts whose name needs no fitting pick first, so a fitted name never takes theirs.
+    let fitted = |a: &DiscoveredAccount| default_profile_name(a) != email_local_part(&a.email);
     to_derive.sort_by_key(|a| fitted(a));
     for a in to_derive {
-        let base = if a.is_primary { "default".to_string() } else { default_profile_name(&a.config_dir) };
+        let base = default_profile_name(a);
+        let own_dir = util::resolve(&a.config_dir);
         let taken = |name: &str| {
             let folded = fold_profile_name(&profile_id(a.tool, name));
-            assigned.contains(&folded) || (!a.is_primary && (registered.contains(&folded) || occupied.contains(&folded)))
+            if assigned.contains(&folded) {
+                return true;
+            }
+            // The primary has no backup directory, so only another registered profile's name
+            // stands in its way; a name already held by this same dir is its own to keep.
+            match held.get(&folded) {
+                Some(Some(dir)) => *dir != own_dir,
+                Some(None) => !a.is_primary,
+                None => false,
+            }
         };
         let mut name = base.clone();
         let mut n = 2;
@@ -174,6 +212,56 @@ pub fn propose_init_names(accounts: &[DiscoveredAccount], registry: Option<&Regi
         names.insert(a.config_dir.clone(), name);
     }
     names
+}
+
+/// What `discover` finds: accounts signed in under a config dir clm does not know yet, and
+/// registered dirs that are signed in to another account than the one recorded.
+pub struct Discovery {
+    pub new: Vec<DiscoveredAccount>,
+    /// The profile id, the email it was registered with, and the account the dir holds now.
+    pub changed: Vec<(String, String, DiscoveredAccount)>,
+    /// A tool's primary dir holding an account while no profile registers it: init's job.
+    pub unregistered_primary: Vec<DiscoveredAccount>,
+}
+
+pub fn discover(registry: &Registry) -> Discovery {
+    let mut found = Discovery { new: Vec::new(), changed: Vec::new(), unregistered_primary: Vec::new() };
+    for a in discover_accounts() {
+        let here = util::resolve(&a.config_dir);
+        if registry.profiles.values().any(|p| p.is_api() && util::resolve(&p.dir()) == here) {
+            continue;
+        }
+        match registered_on(registry, &a) {
+            Some((id, p)) => {
+                if !same_account(p, &a) {
+                    found.changed.push((id.clone(), p.email.clone(), a));
+                }
+            }
+            None if a.is_primary => found.unregistered_primary.push(a),
+            None => found.new.push(a),
+        }
+    }
+    found
+}
+
+/// Records the account a registered dir is signed in to now.
+pub fn record_account_change(id: &str, account: &DiscoveredAccount) -> Result<()> {
+    update_registry(|current| {
+        let mut current = current.ok_or_else(no_registry_error)?;
+        if let Some(p) = current.profiles.get_mut(id) {
+            p.email = account.email.clone();
+            p.org_name = account.org_name.clone();
+        }
+        Ok(Some(current))
+    })?;
+    Ok(())
+}
+
+/// Whether profiles added next to the registered ones share session history by default: they
+/// do when every registered subscription profile apart from the primaries does.
+pub fn registry_merges_sessions(registry: &Registry) -> bool {
+    let mut linked = registry.profiles.values().filter(|p| !p.is_api() && !p.primary()).peekable();
+    linked.peek().is_some() && linked.all(|p| p.merge_sessions == Some(true))
 }
 
 fn backup_dir_taken(backup_dir: &Path, id: &str) -> anyhow::Error {
@@ -251,6 +339,8 @@ pub fn initialize_registry(accounts: &[DiscoveredAccount], options: InitOptions)
         id: String,
         backup_dir: Option<PathBuf>,
         kept: bool,
+        /// The id this config dir was registered under, when init gives it another name.
+        renamed_from: Option<String>,
     }
     let mut planned: Vec<Planned> = Vec::new();
     let mut init_ids: HashMap<String, (String, bool, bool)> =
@@ -261,6 +351,11 @@ pub fn initialize_registry(accounts: &[DiscoveredAccount], options: InitOptions)
         let kept = existing.as_ref().and_then(|r| r.profiles.get(&id)).is_some_and(|p| {
             p.tool() == account.tool && util::resolve(&p.dir()) == util::resolve(&account.config_dir)
         });
+        let renamed_from = if kept {
+            None
+        } else {
+            existing.as_ref().and_then(|r| registered_on(r, account)).map(|(old, _)| old.clone()).filter(|old| *old != id)
+        };
         if !kept {
             validate_profile_name(&name)?;
         }
@@ -292,7 +387,7 @@ pub fn initialize_registry(accounts: &[DiscoveredAccount], options: InitOptions)
             let (_, moving) = links::codex_state_to_move(account.tool, &account.config_dir, &tool_primary, dir, options.merge_sessions, false);
             links::refuse_while_codex_runs(&account.config_dir, &moving, "clm init --auto --force", options.force)?;
         }
-        planned.push(Planned { account, id, backup_dir, kept });
+        planned.push(Planned { account, id, backup_dir, kept, renamed_from });
     }
 
     fs::create_dir_all(data_dir())?;
@@ -311,7 +406,18 @@ pub fn initialize_registry(accounts: &[DiscoveredAccount], options: InitOptions)
         profile.merge_sessions = if a.is_primary { None } else { Some(options.merge_sessions) };
         registry.profiles.insert(plan.id.clone(), profile);
         if let Some(dir) = &plan.backup_dir {
-            if !plan.kept {
+            let old_backup = plan
+                .renamed_from
+                .as_deref()
+                .and_then(|old| backup_dir_for(a.tool, name_of(old)).ok())
+                .filter(|old| util::dir_occupied(old));
+            if let Some(old) = old_backup {
+                // A renamed profile keeps the original files its old name's backup holds.
+                clear_backup_dir(dir, &plan.id)?;
+                fs::rename(&old, dir).map_err(|e| {
+                    anyhow!("Could not move {} to {} for '{}': {e}", shown(&old), shown(dir), plan.id)
+                })?;
+            } else if !plan.kept {
                 claim_backup_dir(dir, &plan.id)?;
             } else {
                 fs::create_dir_all(dir)?;
@@ -336,7 +442,9 @@ pub fn initialize_registry(accounts: &[DiscoveredAccount], options: InitOptions)
         }
         let picked = options.default_profile.as_ref().map(|n| profile_id(Tool::Claude, n));
         for tool in ALL_TOOLS {
-            let active = current.as_ref().and_then(|c| c.active(tool).cloned());
+            let active = current.as_ref().and_then(|c| c.active(tool).cloned()).map(|a| {
+                planned.iter().find(|p| p.renamed_from.as_deref() == Some(a.as_str())).map(|p| p.id.clone()).unwrap_or(a)
+            });
             let next = picked
                 .clone()
                 .filter(|p| tool == Tool::Claude && registry.profiles.contains_key(p))
@@ -351,6 +459,9 @@ pub fn initialize_registry(accounts: &[DiscoveredAccount], options: InitOptions)
     .expect("init writes the registry");
     for plan in &planned {
         let _ = fs::remove_file(plan.account.config_dir.join(ADD_PENDING_MARKER));
+        if let Some(old) = &plan.renamed_from {
+            usage::rename_profile(old, &plan.id);
+        }
     }
     // Usage history is kept across a re-init, and across an import from clausona: seeding
     // below only marks what is new as seen.
@@ -1751,4 +1862,31 @@ pub fn uninstall() -> Vec<String> {
         }
     }
     removed
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::*;
+
+    fn account(email: &str, dir: &str, is_primary: bool) -> DiscoveredAccount {
+        DiscoveredAccount { tool: Tool::Claude, config_dir: PathBuf::from(dir), email: email.into(), org_name: None, is_primary }
+    }
+
+    #[test]
+    fn names_follow_the_email() {
+        assert_eq!(default_profile_name(&account("wyl@mzjpg.com", "/h/.claude", true)), "wyl");
+        assert_eq!(default_profile_name(&account("umesok@gmail.com", "/h/.claude-wyl_mzjpg", false)), "umesok");
+        assert_eq!(default_profile_name(&account("Alice.Smith+work@corp.io", "/h/.claude-a", false)), "alice.smith-work");
+        assert_eq!(default_profile_name(&account("", "/h/.claude-team", false)), "team");
+        assert_eq!(default_profile_name(&account("", "/h/.claude", true)), "default");
+    }
+
+    #[test]
+    fn a_changed_account_is_not_the_registered_one() {
+        let mut p = Profile::new(Tool::Claude, "/h/.claude-x", "wyl@mzjpg.com");
+        assert!(same_account(&p, &account("WYL@mzjpg.com", "/h/.claude-x", false)));
+        assert!(!same_account(&p, &account("umesok@gmail.com", "/h/.claude-x", false)));
+        p.email.clear();
+        assert!(same_account(&p, &account("umesok@gmail.com", "/h/.claude-x", false)));
+    }
 }

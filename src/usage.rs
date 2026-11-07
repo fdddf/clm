@@ -158,6 +158,26 @@ pub fn track_usage(profile_id: Option<&str>) {
     });
 }
 
+/// Moves the usage recorded under `old` to `new`, for a profile init renamed. Usage already
+/// under `new` is kept and `old`'s records join it.
+pub fn rename_profile(old: &str, new: &str) {
+    with_usage_lock(|| {
+        let mut usage = load_usage_store();
+        let Some(Value::Object(moved)) = usage.remove(old) else { return };
+        let entry = profile_entry(&mut usage, new);
+        if let Some(Value::Array(records)) = moved.get("records") {
+            entry.get_mut("records").and_then(|r| r.as_array_mut()).unwrap().extend(records.iter().cloned());
+        }
+        if let Some(Value::Object(seen)) = moved.get("seenSessions") {
+            let into = entry.get_mut("seenSessions").and_then(|s| s.as_object_mut()).unwrap();
+            for (k, v) in seen {
+                into.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        let _ = write_json(&usage_path(), &Value::Object(usage), None);
+    });
+}
+
 /// Marks what a config dir already holds as seen, so usage from before tracking began is not
 /// recorded.
 pub fn seed_seen_sessions(profile_id: &str, config_dir: &Path) {
