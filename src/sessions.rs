@@ -554,7 +554,9 @@ pub fn resume(opts: &ResumeOptions) -> Result<i32> {
             // No profile sees it: run with the config directory that holds it.
             let config = transcript.parent().and_then(Path::parent).and_then(Path::parent).map(Path::to_path_buf);
             let default = realpath(&tools::default_config_dir(Tool::Claude));
-            if let Some(config) = config.filter(|c| realpath(c) != default) {
+            let config = config.unwrap_or_else(|| tools::default_config_dir(Tool::Claude));
+            cmd.env(tools::ANTHROPIC_CONFIG_ENV, tools::anthropic_config_dir(&config));
+            if realpath(&config) != default {
                 cmd.env("CLAUDE_CONFIG_DIR", config);
             } else {
                 cmd.env_remove("CLAUDE_CONFIG_DIR");

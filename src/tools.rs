@@ -31,6 +31,16 @@ pub fn config_env_var(tool: Tool) -> &'static str {
     }
 }
 
+/// Claude Code also signs in through an Anthropic Console "profile" kept in
+/// `$ANTHROPIC_CONFIG_DIR` (default `~/.config/anthropic`), and an active one there wins over
+/// the claude.ai sign-in in CLAUDE_CONFIG_DIR. That directory is machine-wide, so every clm
+/// profile gets its own beside its config directory.
+pub const ANTHROPIC_CONFIG_ENV: &str = "ANTHROPIC_CONFIG_DIR";
+
+pub fn anthropic_config_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("anthropic")
+}
+
 pub fn binary(tool: Tool) -> &'static str {
     tool.name()
 }
@@ -643,6 +653,7 @@ fn login_command(tool: Tool, config_dir: &Path) -> Command {
             if !is_default_claude_dir(&home(), config_dir) {
                 cmd.env("CLAUDE_CONFIG_DIR", config_dir);
             }
+            cmd.env(ANTHROPIC_CONFIG_ENV, anthropic_config_dir(config_dir));
         }
         Tool::Codex => {
             cmd.arg("login");
@@ -680,6 +691,8 @@ pub fn verify_sign_in(tool: Tool, config_dir: &Path) -> SignInCheck {
         cmd.env_remove(key);
     }
     cmd.env_remove("CLAUDE_CODE_SIMPLE");
+    cmd.env(ANTHROPIC_CONFIG_ENV, anthropic_config_dir(config_dir));
+    cmd.env_remove("ANTHROPIC_PROFILE");
     let Ok(mut child) = cmd.spawn() else {
         return SignInCheck::Unknown("could not run 'claude auth status'".into());
     };

@@ -221,6 +221,10 @@ pub fn build_profile_env(id: &str, profile: &Profile) -> BuiltEnv {
     if !profile.primary() && resolved_config != resolved_default {
         env.insert(tools::config_env_var(tool).into(), profile.config_dir.clone());
     }
+    if tool == Tool::Claude {
+        let dir = tools::anthropic_config_dir(&profile.dir());
+        env.insert(tools::ANTHROPIC_CONFIG_ENV.into(), dir.to_string_lossy().into_owned());
+    }
 
     let api = if profile.is_api() { profile.api.as_ref() } else { None };
     if let Some(api) = api {
@@ -569,5 +573,21 @@ mod tests {
         assert!(validate_env_entry("ANTHROPIC_BASE_URL", "http://x", true).is_err());
         assert!(validate_env_entry("CLAUDE_CONFIG_DIR", "/x", false).is_err());
         assert!(validate_env_entry("CLAUDE_CODE_EXTRA_BODY", "[1]", false).is_err());
+    }
+
+    fn claude_profile(dir: &str, env: Option<Value>) -> Profile {
+        serde_json::from_value(json!({"tool": "claude", "configDir": dir, "isPrimary": true, "env": env})).unwrap()
+    }
+
+    #[test]
+    fn console_profile_store_is_per_profile() {
+        // Even the primary gets its own store, or a machine-wide Console sign-in wins over it.
+        let built = build_profile_env("claude:a", &claude_profile("/tmp/clm-test/.claude", None));
+        assert!(!built.env.contains_key("CLAUDE_CONFIG_DIR"));
+        assert_eq!(built.env.get("ANTHROPIC_CONFIG_DIR").map(String::as_str), Some("/tmp/clm-test/.claude/anthropic"));
+
+        let shared = json!({"ANTHROPIC_CONFIG_DIR": "/tmp/clm-test/.config/anthropic"});
+        let built = build_profile_env("claude:b", &claude_profile("/tmp/clm-test/.claude-b", Some(shared)));
+        assert_eq!(built.env.get("ANTHROPIC_CONFIG_DIR").map(String::as_str), Some("/tmp/clm-test/.config/anthropic"));
     }
 }
